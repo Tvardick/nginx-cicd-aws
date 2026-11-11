@@ -1,0 +1,4 @@
+# Allow only needed files to be copied into the Docker image
+*
+!app/
+!nginx/
