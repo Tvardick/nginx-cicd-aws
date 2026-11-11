@@ -1,0 +1,12 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# Local secrets and runtime files
+.env
+.env.previous
+
+# CI artifact
+image.tar.gz
