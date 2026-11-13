@@ -6,7 +6,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE=nginx-cicd-aws-test
 export HOST_PORT="${HOST_PORT:-18080}"
-export PRUNE_IMAGES=0
 WORK=$(mktemp -d)
 failures=0
 out=""
@@ -52,8 +51,8 @@ served_version() { curl -fsS "http://127.0.0.1:$HOST_PORT/version.txt" 2>/dev/nu
 serves() { [[ $(served_version) == "$1" ]]; }
 
 echo "building test images"
-IMAGE=$IMAGE TAG=good "$ROOT_DIR/scripts/deploy.sh" build >/dev/null 2>&1
-IMAGE=$IMAGE TAG=good2 "$ROOT_DIR/scripts/deploy.sh" build >/dev/null 2>&1
+IMAGE=$IMAGE TAG=good "$ROOT_DIR/scripts/deploy.py" build >/dev/null 2>&1
+IMAGE=$IMAGE TAG=good2 "$ROOT_DIR/scripts/deploy.py" build >/dev/null 2>&1
 docker build -q -t "$IMAGE:broken" "$ROOT_DIR/tests/fixtures/broken" >/dev/null
 
 # Scenario 1: the very first deploy fails. There is nothing to roll back to.
