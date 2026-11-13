@@ -1,0 +1,11 @@
+# Weekly pull requests that bump pinned action SHAs and the base image digest.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,119 @@
+name: ci-cd
+
+# Every push to any branch and every pull request is checked.
+# Only a push to main publishes the image and deploys it.
+on:
+  push:
+  pull_request:
+
+# A newer commit on a feature branch cancels the older run. Runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Least privilege by default. Jobs ask for more only when they need it.
+permissions:
+  contents: read
+
+env:
+  HADOLINT_IMAGE: hadolint/hadolint:v2.15.1
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+  RUFF_VERSION: 0.17.5
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # push to GHCR, used only on main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint Dockerfile and scripts
+        run: |
+          docker run --rm -i "$HADOLINT_IMAGE" < Dockerfile
+          shellcheck scripts/*.sh tests/*.sh
+          pipx run --spec "ruff==$RUFF_VERSION" ruff check --line-length 100 scripts/
+
+      # GHCR needs a lowercase name, github.repository keeps the owner's case.
+      - name: Set image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: scripts/deploy.py build
+        env:
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+
+      - name: Smoke test image
+        run: scripts/deploy.py test
+
+      - name: Scan image for vulnerabilities
+        run: >
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE"
+          image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE:$GITHUB_SHA"
+
+      - name: Test deploy and rollback script
+        run: tests/remote-deploy.test.sh
+
+      # Only the image that passed all checks above reaches the registry.
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: scripts/deploy.py push
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: production
+      url: ${{ vars.APP_URL }}
+    # One deploy at a time. A started deploy is never cancelled halfway.
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      APP_URL: ${{ vars.APP_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # The private key is an environment secret: only jobs in "production" (branch main) get it.
+      # known_hosts pins the server host key, so ssh refuses a server that pretends to be ours.
+      - name: Set up SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ vars.SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Deploy over SSH
+        run: scripts/deploy.py deploy
+
+      # Proves that the public URL serves this exact commit, not an old container.
+      - name: Check public URL
+        run: |
+          deployed=$(curl -fsS --retry 5 --retry-all-errors --retry-delay 3 "$APP_URL/version.txt")
+          if [ "$deployed" != "$GITHUB_SHA" ]; then
+            echo "::error::expected $GITHUB_SHA, the server returns $deployed"
+            exit 1
+          fi
+          echo "public URL serves $deployed"
